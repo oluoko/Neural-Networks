@@ -39,53 +39,100 @@ class MusicGenreClassifier(torch.nn.Module):
         return self.model(x)
 
 
-# Function to extract features from audio (same as in training)
+# Function to safely compute statistics and handle NaNs
+def safe_stats(feature):
+    try:
+        mean_val = np.mean(feature)
+        std_val = np.std(feature)
+        # Handle empty arrays or constant values that could cause issues with skew/kurtosis
+        if len(feature) < 2 or np.all(feature == feature[0]):
+            skew_val = 0
+            kurtosis_val = 0
+        else:
+            skew_val = stats.skew(feature)
+            kurtosis_val = stats.kurtosis(feature)
+
+        # Replace NaN values with 0
+        if np.isnan(mean_val):
+            mean_val = 0
+        if np.isnan(std_val):
+            std_val = 0
+        if np.isnan(skew_val):
+            skew_val = 0
+        if np.isnan(kurtosis_val):
+            kurtosis_val = 0
+
+        return mean_val, std_val, skew_val, kurtosis_val
+    except Exception:
+        # If any calculation fails, return zeros
+        return 0, 0, 0, 0
+
+
+# Function to extract features from audio (improved for robustness)
 def extract_features(audio_array, sample_rate):
     # Extract various audio features
-    # Mel-frequency cepstral coefficients
-    mfccs = librosa.feature.mfcc(y=audio_array, sr=sample_rate, n_mfcc=13)
+    # Handle empty or very short audio
+    if len(audio_array) < sample_rate // 2:  # Less than 0.5 seconds
+        print(
+            json.dumps({"error": "Audio file too short or corrupted"}), file=sys.stderr
+        )
+        sys.exit(1)
 
-    # Spectral features
-    spectral_centroid = librosa.feature.spectral_centroid(
-        y=audio_array, sr=sample_rate
-    )[0]
-    spectral_bandwidth = librosa.feature.spectral_bandwidth(
-        y=audio_array, sr=sample_rate
-    )[0]
-    spectral_rolloff = librosa.feature.spectral_rolloff(y=audio_array, sr=sample_rate)[
-        0
-    ]
-
-    # Rhythm features
-    tempo, _ = librosa.beat.beat_track(y=audio_array, sr=sample_rate)
-
-    # Zero crossing rate
-    zero_crossing_rate = librosa.feature.zero_crossing_rate(audio_array)[0]
-
-    # Compute statistics for each feature
+    # Initialize features dictionary
     features = {}
 
-    # MFCC stats
-    for i in range(mfccs.shape[0]):
-        features[f"mfcc{i+1}_mean"] = np.mean(mfccs[i])
-        features[f"mfcc{i+1}_std"] = np.std(mfccs[i])
-        features[f"mfcc{i+1}_skew"] = stats.skew(mfccs[i])
-        features[f"mfcc{i+1}_kurtosis"] = stats.kurtosis(mfccs[i])
+    try:
+        # Mel-frequency cepstral coefficients
+        mfccs = librosa.feature.mfcc(y=audio_array, sr=sample_rate, n_mfcc=13)
 
-    # Other features stats
-    for name, feature in [
-        ("spectral_centroid", spectral_centroid),
-        ("spectral_bandwidth", spectral_bandwidth),
-        ("spectral_rolloff", spectral_rolloff),
-        ("zero_crossing_rate", zero_crossing_rate),
-    ]:
-        features[f"{name}_mean"] = np.mean(feature)
-        features[f"{name}_std"] = np.std(feature)
-        features[f"{name}_skew"] = stats.skew(feature)
-        features[f"{name}_kurtosis"] = stats.kurtosis(feature)
+        # Spectral features
+        spectral_centroid = librosa.feature.spectral_centroid(
+            y=audio_array, sr=sample_rate
+        )[0]
+        spectral_bandwidth = librosa.feature.spectral_bandwidth(
+            y=audio_array, sr=sample_rate
+        )[0]
+        spectral_rolloff = librosa.feature.spectral_rolloff(
+            y=audio_array, sr=sample_rate
+        )[0]
 
-    # Add tempo
-    features["tempo"] = tempo
+        # Rhythm features
+        tempo, _ = librosa.beat.beat_track(y=audio_array, sr=sample_rate)
+
+        # Zero crossing rate
+        zero_crossing_rate = librosa.feature.zero_crossing_rate(audio_array)[0]
+
+        # Compute statistics for each feature
+        # MFCC stats
+        for i in range(mfccs.shape[0]):
+            mean_val, std_val, skew_val, kurtosis_val = safe_stats(mfccs[i])
+            features[f"mfcc{i+1}_mean"] = mean_val
+            features[f"mfcc{i+1}_std"] = std_val
+            features[f"mfcc{i+1}_skew"] = skew_val
+            features[f"mfcc{i+1}_kurtosis"] = kurtosis_val
+
+        # Other features stats
+        for name, feature in [
+            ("spectral_centroid", spectral_centroid),
+            ("spectral_bandwidth", spectral_bandwidth),
+            ("spectral_rolloff", spectral_rolloff),
+            ("zero_crossing_rate", zero_crossing_rate),
+        ]:
+            mean_val, std_val, skew_val, kurtosis_val = safe_stats(feature)
+            features[f"{name}_mean"] = mean_val
+            features[f"{name}_std"] = std_val
+            features[f"{name}_skew"] = skew_val
+            features[f"{name}_kurtosis"] = kurtosis_val
+
+        # Add tempo
+        features["tempo"] = float(tempo) if not np.isnan(tempo) else 0.0
+
+    except Exception as e:
+        print(
+            json.dumps({"error": f"Feature extraction failed: {str(e)}"}),
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     return features
 
@@ -99,17 +146,57 @@ def main():
     model_dir = sys.argv[2]
 
     try:
-        # Load the audio file using librosa
-        audio_array, sample_rate = librosa.load(audio_path, sr=22050)
+        # Check if the file exists
+        if not os.path.exists(audio_path):
+            print(json.dumps({"error": "Audio file not found"}), file=sys.stderr)
+            sys.exit(1)
+
+        # Load the audio file using librosa with better error handling
+        try:
+            # Try to use a different offset if the file is corrupted at the beginning
+            audio_array, sample_rate = librosa.load(
+                audio_path, sr=22050, offset=0.0, duration=30.0
+            )
+
+            # Check if audio was successfully loaded
+            if len(audio_array) == 0:
+                print(
+                    json.dumps({"error": "Failed to load audio file"}), file=sys.stderr
+                )
+                sys.exit(1)
+
+        except Exception as e:
+            # Try alternative loading methods
+            try:
+                # Try a different offset
+                audio_array, sample_rate = librosa.load(
+                    audio_path, sr=22050, offset=1.0, duration=30.0
+                )
+            except Exception:
+                print(
+                    json.dumps({"error": f"Could not load audio file: {str(e)}"}),
+                    file=sys.stderr,
+                )
+                sys.exit(1)
 
         # Extract features
         features = extract_features(audio_array, sample_rate)
 
-        # Convert features to the expected format
-        feature_vector = np.array([[value for value in features.values()]])
+        # Make sure all feature values are single scalar values, not arrays or sequences
+        for key, value in list(features.items()):
+            if isinstance(value, (list, np.ndarray)) or np.isnan(value):
+                features[key] = 0.0  # Replace problematic values
+
+        # Convert features to the expected format - make sure all values are scalars
+        feature_values = [float(value) for value in features.values()]
+        feature_vector = np.array([feature_values])
 
         # Load the scaler
         scaler_path = os.path.join(model_dir, "scaler.pkl")
+        if not os.path.exists(scaler_path):
+            print(json.dumps({"error": "Scaler file not found"}), file=sys.stderr)
+            sys.exit(1)
+
         with open(scaler_path, "rb") as scaler_file:
             scaler = pickle.load(scaler_file)
 
@@ -118,6 +205,12 @@ def main():
 
         # Load the label mapping
         label_mapping_path = os.path.join(model_dir, "label_mapping.json")
+        if not os.path.exists(label_mapping_path):
+            print(
+                json.dumps({"error": "Label mapping file not found"}), file=sys.stderr
+            )
+            sys.exit(1)
+
         with open(label_mapping_path, "r") as mapping_file:
             label_mapping = json.load(mapping_file)
 
@@ -128,6 +221,10 @@ def main():
 
         # Load the model
         model_path = os.path.join(model_dir, "music_genre_classifier.pth")
+        if not os.path.exists(model_path):
+            print(json.dumps({"error": "Model file not found"}), file=sys.stderr)
+            sys.exit(1)
+
         input_size = scaled_features.shape[1]
         num_classes = len(label_mapping)
 
@@ -158,7 +255,9 @@ def main():
             result = {
                 "genre": predicted_genre,
                 "confidence": confidence,
-                "genreConfidences": genre_confidences,
+                "genreConfidences": sorted(
+                    genre_confidences, key=lambda x: x["confidence"], reverse=True
+                ),
             }
 
             print(json.dumps(result))

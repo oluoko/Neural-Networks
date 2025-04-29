@@ -13,7 +13,7 @@ export default function AudioPlayer({ audioSrc }: AudioPlayerProps) {
   if (!audioSrc) return null;
 
   return (
-    <div className="w-full max-w-md mx-auto mt-8 bg-gray-100 p-4 rounded-lg">
+    <div className="w-full max-w-md mx-auto mt-8 bg-gray-100 p-4 rounded-lg text-black border-2 border-gray-300 shadow-md">
       <h3 className="text-lg font-medium mb-2">Audio Preview</h3>
       <audio ref={audioRef} controls className="w-full">
         <source src={audioSrc} type="audio/mpeg" />

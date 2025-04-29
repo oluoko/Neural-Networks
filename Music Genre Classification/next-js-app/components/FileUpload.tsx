@@ -48,7 +48,7 @@ export default function FileUpload({
   };
 
   return (
-    <div className="w-full max-w-md mx-auto">
+    <div className="w-full max-w-md mx-auto mt-8">
       <div
         className={`border-2 border-dashed rounded-lg p-8 text-center ${
           dragActive ? "border-blue-500 bg-blue-50" : "border-gray-300"
